@@ -3,18 +3,29 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- ніщо не має відкриватись у новій вкладці/вікні поза нашим контекстом -->
+<base target="_self">
 <title>TV Відео</title>
 <style>
   :root{ --bg:#0f0f0f; --card:#1c1c1c; --text:#fff; --muted:#aaa; --accent:#ff4444; }
   *{ box-sizing:border-box; margin:0; padding:0; }
-  html,body{ background:var(--bg); color:var(--text); font-family:Arial,Helvetica,sans-serif; font-size:24px; }
+  html,body{ background:var(--bg); color:var(--text); font-family:Arial,Helvetica,sans-serif; font-size:24px; overflow-x:hidden; }
   body{ padding-bottom:60px; }
 
   header{ position:sticky; top:0; z-index:50; background:var(--bg); padding:20px 30px 12px; box-shadow:0 6px 20px rgba(0,0,0,.6); }
   #search{ width:100%; height:70px; font-size:30px; padding:0 24px; border-radius:12px; border:none; background:#222; color:#fff; outline:none; }
 
-  #chips{ display:flex; flex-wrap:wrap; gap:16px; margin-top:16px; }
-  .chip{ height:60px; padding:0 28px; font-size:24px; border:none; border-radius:30px; background:#2a2a2a; color:#fff; cursor:pointer; white-space:nowrap; }
+  /* Панель підказок прихована, поки фокус не в полі пошуку.
+     Не flex: gap у flexbox не працює до Chrome 84, а старі TV-движки
+     ненадійно переносять flex-рядки. Інлайнові елементи переносяться скрізь. */
+  #chips{ display:none; max-width:100%; overflow-x:hidden; margin-top:10px; }
+  #chips.open{ display:block; }
+  /* white-space тут має лишатись normal — інакше рядок не перенесеться */
+  /* навмисно менші за TV-мінімум — інакше з'їдають ряд сітки */
+  .chip{ display:inline-block; vertical-align:top; margin:0 10px 10px 0;
+         max-width:100%; height:44px; padding:0 18px; font-size:20px;
+         border:none; border-radius:22px; overflow:hidden; text-overflow:ellipsis;
+         background:#2a2a2a; color:#fff; cursor:pointer; white-space:nowrap; }
 
   #grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:28px; padding:30px; }
   @media(max-width:1100px){ #grid{ grid-template-columns:repeat(2,1fr); } }
@@ -34,7 +45,10 @@
 
   /* Дуже помітний фокус для пульта */
   :focus{ outline:none; }
-  .chip:focus, .card:focus, #search:focus, #backBtn:focus, #fsBtn:focus{
+  /* #search — на всю ширину хедера, тому БЕЗ scale: 100%*1.06 вилазить за екран.
+     Товстого outline для пульта достатньо. */
+  #search:focus{ outline:6px solid var(--accent); outline-offset:-6px; }
+  .chip:focus, .card:focus, #backBtn:focus, #fsBtn:focus{
     outline:6px solid var(--accent);
     outline-offset:2px;
     transform:scale(1.06);
@@ -70,7 +84,7 @@
 <body>
 
 <header>
-  <input id="search" type="text" placeholder="Пошук відео..." autocomplete="off">
+  <input id="search" type="text" placeholder="Пошук" autocomplete="off">
   <div id="chips"></div>
 </header>
 
@@ -88,37 +102,23 @@
 (function(){
   "use strict";
 
-  // Перевірено 2026-07-20: з публічних інстансів лише перший віддає JSON + CORS.
-  // Решта — резерв (403/Anubis/502 на момент перевірки, можуть ожити).
-  var INSTANCES = [
-    "https://yt.chocolatemoo53.com",
-    "https://invidious.nerdvpn.de",
-    "https://inv.nadeko.net",
-    "https://invidious.tiekoetter.com",
-    "https://invidious.f5.si",
-    "https://invidious.privacyredirect.com"
-  ];
+  // Cloudflare Worker-проксі (див. README.md). Без завершального слеша.
+  var WORKER_URL = "https://winter-star-48dc.sweaterbaddy.workers.dev";
+
+  // Ротація дзеркал і CORS живуть у Worker'і — клієнт про них не знає.
   var CHIPS = [
-    "africa online","africa online camera","тварини африка","відео природа",
-    "сафарі наживо","дика природа 4k","океан наживо","космос nasa live",
-    "гори природа 4k","ліс звуки природи"
+    "africa online","africam","africa camera online",
+    "тварини африка","відео природа","сафарі наживо","дика природа 4k",
+    "океан наживо","гори природа 4k","домашні рецепти","рецепти дома"
   ];
-  var DEFAULT_QUERY = "africa online";
+  // Запит для автопошуку на старті. У полі не показується (там placeholder),
+  // тому англійська тут не змішує мови в інтерфейсі.
+  var DEFAULT_QUERY = "africa camera online";
   var TIMEOUT = 4000;
 
   var $ = function(id){ return document.getElementById(id); };
   var grid = $("grid"), status = $("status"), searchEl = $("search");
   var state = { query:"", page:1, loading:false, done:false };
-
-  // --- Invidious з fallback + кеш робочого інстансу ---
-  function orderedInstances(){
-    var cached = null;
-    try { cached = localStorage.getItem("inv_instance"); } catch(e){}
-    if(cached && INSTANCES.indexOf(cached) !== -1){
-      return [cached].concat(INSTANCES.filter(function(i){ return i!==cached; }));
-    }
-    return INSTANCES.slice();
-  }
 
   // XHR замість fetch/AbortController — працює і в старих TV-браузерах
   function getJSON(url, onOk, onErr){
@@ -142,28 +142,20 @@
     try { xhr.send(); } catch(e){ fail(); }
   }
 
-  // Пробує інстанси по черзі, поки один не відповість
+  // Один стабільний ендпоінт. Перебір дзеркал і CORS — на боці Worker'а.
   function searchInvidious(query, page, onOk, onErr){
-    var list = orderedInstances();
-    var i = 0;
-    (function next(){
-      if(i >= list.length) return onErr();
-      var base = list[i++];
-      var url = base + "/api/v1/search?q=" + encodeURIComponent(query) +
-                "&page=" + page + "&type=video";
-      getJSON(url, function(data){
-        if(!(data instanceof Array)) return next();
-        try { localStorage.setItem("inv_instance", base); } catch(e){}
-        onOk(data, base); // base потрібен для відносних URL прев'ю
-      }, next);
-    })();
+    var url = WORKER_URL + "/search?q=" + encodeURIComponent(query) + "&page=" + page;
+    getJSON(url, function(data){
+      if(!(data instanceof Array)) return onErr(); // напр. {"error":"all_instances_down"}
+      onOk(data);
+    }, onErr);
   }
 
   // --- Рендер ---
   function ytimg(id, q){ return "https://i.ytimg.com/vi/"+id+"/"+q+".jpg"; }
 
-  // Інстанси віддають або повний URL, або відносний шлях "/vi/ID/mqdefault.jpg".
-  // Відносний треба клеїти до домену ТОГО інстансу, з якого прийшла відповідь.
+  // Worker уже робить URL прев'ю абсолютними. Але якщо звідкись прийшов
+  // відносний шлях, а дзеркало невідоме — беремо прев'ю з YouTube CDN.
   function thumbUrl(v, base){
     var list = (v.videoThumbnails instanceof Array) ? v.videoThumbnails : [];
     var pick = null, i;
@@ -173,7 +165,7 @@
     if(!pick) return ytimg(v.videoId, "mqdefault");        // немає прев'ю -> одразу YouTube CDN
     if(pick.indexOf("//") === 0)   return "https:" + pick; // protocol-relative
     if(pick.indexOf("http") === 0) return pick;            // вже повний
-    if(pick.charAt(0) === "/")     return (base || "") + pick;
+    if(pick.charAt(0) === "/")     return base ? base + pick : ytimg(v.videoId, "mqdefault");
     return pick;
   }
 
@@ -241,10 +233,10 @@
     if(state.loading || state.done) return;
     state.loading = true;
     if(!isFirst) status.textContent = "Завантаження...";
-    searchInvidious(state.query, state.page, function(data, base){
+    searchInvidious(state.query, state.page, function(data){
       state.loading = false;
       if(!data.length){ state.done = true; status.textContent = isFirst ? "Нічого не знайдено" : ""; return; }
-      renderCards(data, base);
+      renderCards(data);
       state.page++;
       status.textContent = "";
       if(isFirst) focusFirstCard();
@@ -317,9 +309,20 @@
     showMsg(ytErrorText(code));
   }
 
+  // Свідомо БЕЗ allow-popups і allow-top-navigation*: саме вони дозволяють
+  // плеєру відкрити youtube.com або перекинути туди всю сторінку.
+  // allow-same-origin/allow-scripts потрібні, інакше плеєр не запуститься.
+  var SANDBOX = "allow-scripts allow-same-origin allow-presentation";
+
   function fallbackIframe(videoId){
-    host.innerHTML = '<iframe allow="autoplay; encrypted-media" allowfullscreen '+
+    host.innerHTML = '<iframe sandbox="'+SANDBOX+'" allow="autoplay; encrypted-media" allowfullscreen '+
       'src="https://www.youtube-nocookie.com/embed/'+videoId+'?autoplay=1&rel=0"></iframe>';
+  }
+
+  // YT.Player створює iframe сам, тому атрибут вішаємо на вже створений
+  function lockIframe(){
+    var f = host.querySelector && host.querySelector("iframe");
+    if(f && f.getAttribute("sandbox") !== SANDBOX) f.setAttribute("sandbox", SANDBOX);
   }
 
   function openPlayer(videoId){
@@ -335,10 +338,11 @@
           width: "100%", height: "100%",
           playerVars: { autoplay:1, rel:0 },
           events: {
-            onReady: function(e){ try { e.target.playVideo(); } catch(err){} },
+            onReady: function(e){ lockIframe(); try { e.target.playVideo(); } catch(err){} },
             onError: function(e){ handleYTError(videoId, e.data); }
           }
         });
+        lockIframe();
         return;
       } catch(err){ /* падаємо у fallback нижче */ }
     }
@@ -363,15 +367,43 @@
 
   // --- Chips ---
   var chipsEl = $("chips");
+  function showChips(){ chipsEl.className = "open"; }
+  function hideChips(){ chipsEl.className = ""; }
+
   CHIPS.forEach(function(text){
     var b = document.createElement("button");
     b.className = "chip"; b.textContent = text; b.setAttribute("tabindex","0");
-    b.addEventListener("click", function(){ searchEl.value = text; doSearch(text); focusFirstCard(); });
+    b.addEventListener("click", function(){
+      searchEl.value = text;
+      hideChips();
+      doSearch(text);
+      focusFirstCard();
+    });
     chipsEl.appendChild(b);
   });
 
+  // Панель видно, лише поки фокус у полі пошуку або на самій підказці.
+  // focus не спливає, тому слухаємо у фазі перехоплення (працює й у старих движках).
+  document.addEventListener("focus", function(e){
+    var t = e.target;
+    if(t === searchEl || (t && t.className === "chip")) showChips();
+    else hideChips();
+  }, true);
+  searchEl.addEventListener("click", showChips);
+
+  // Запобіжник: у розмітці зараз немає жодного <a>, але якщо колись
+  // з'явиться посилання назовні — воно не має вивести з застосунку.
+  document.addEventListener("click", function(e){
+    var el = e.target;
+    while(el && el.tagName !== "A") el = el.parentNode;
+    if(!el) return;
+    var href = el.getAttribute("href") || "";
+    if(/^https?:/i.test(href)){ e.preventDefault(); }
+  }, true);
+
   searchEl.addEventListener("keydown", function(e){
-    if(e.key === "Enter" && searchEl.value.trim()){ doSearch(searchEl.value.trim()); }
+    if(e.key === "Enter" && searchEl.value.trim()){ hideChips(); doSearch(searchEl.value.trim()); }
+    if(e.key === "Escape"){ hideChips(); focusFirstCard(); } // вихід із пошуку до сітки
   });
 
   // --- Навігація пультом: просторова (spatial) по стрілках ---
@@ -450,7 +482,7 @@
   });
 
   // --- Старт ---
-  searchEl.value = DEFAULT_QUERY;
+  // поле лишається порожнім (placeholder="Пошук"), автопошук іде у фоні
   doSearch(DEFAULT_QUERY);
 })();
 </script>
