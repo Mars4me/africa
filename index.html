@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TV Відео</title>
+<style>
+  :root{ --bg:#0f0f0f; --card:#1c1c1c; --text:#fff; --muted:#aaa; --accent:#ff4444; }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ background:var(--bg); color:var(--text); font-family:Arial,Helvetica,sans-serif; font-size:24px; }
+  body{ padding-bottom:60px; }
+
+  header{ position:sticky; top:0; z-index:50; background:var(--bg); padding:20px 30px 12px; box-shadow:0 6px 20px rgba(0,0,0,.6); }
+  #search{ width:100%; height:70px; font-size:30px; padding:0 24px; border-radius:12px; border:none; background:#222; color:#fff; outline:none; }
+
+  #chips{ display:flex; flex-wrap:wrap; gap:16px; margin-top:16px; }
+  .chip{ height:60px; padding:0 28px; font-size:24px; border:none; border-radius:30px; background:#2a2a2a; color:#fff; cursor:pointer; white-space:nowrap; }
+
+  #grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:28px; padding:30px; }
+  @media(max-width:1100px){ #grid{ grid-template-columns:repeat(2,1fr); } }
+
+  .card{ background:var(--card); border-radius:14px; overflow:hidden; cursor:pointer; text-align:left; border:none; color:inherit; font:inherit; padding:0; display:flex; flex-direction:column; }
+  /* padding-hack замість aspect-ratio — старі TV-браузери його не знають */
+  .thumb{ position:relative; width:100%; height:0; padding-top:56.25%; background:#000; }
+  .thumb img{ position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; display:block; }
+  /* прев'ю не завантажилось узагалі — сірий плейсхолдер замість чорної картки */
+  .thumb.noimg{ background:#333; }
+  .thumb.noimg:after{ content:"▶"; position:absolute; top:50%; left:50%;
+                      transform:translate(-50%,-50%); font-size:64px; color:#666; }
+  .dur{ position:absolute; right:10px; bottom:10px; background:rgba(0,0,0,.85); padding:4px 10px; border-radius:6px; font-size:20px; }
+  .meta{ padding:16px; }
+  .vtitle{ font-size:24px; line-height:1.25; max-height:2.5em; overflow:hidden; }
+  .vchan{ color:var(--muted); font-size:20px; margin-top:8px; }
+
+  /* Дуже помітний фокус для пульта */
+  :focus{ outline:none; }
+  .chip:focus, .card:focus, #search:focus, #backBtn:focus, #fsBtn:focus{
+    outline:6px solid var(--accent);
+    outline-offset:2px;
+    transform:scale(1.06);
+    transition:transform .12s ease;
+    position:relative; z-index:5;
+  }
+
+  #status{ text-align:center; padding:40px; font-size:28px; color:var(--muted); }
+
+  /* Плеєр */
+  #player{ display:none; position:fixed; top:0; left:0; right:0; bottom:0; z-index:100; background:#000; flex-direction:column; }
+  #player.open{ display:flex; }
+
+  /* Панелі не стискаються, відео забирає всю решту висоти */
+  #backBtn{ flex:0 0 auto; height:64px; font-size:26px; font-weight:bold;
+            background:var(--accent); color:#fff; border:none; cursor:pointer; }
+  #fsBtn{ flex:0 0 auto; width:100%; height:72px; font-size:28px; font-weight:bold;
+          background:#333; color:#fff; border:none; cursor:pointer; }
+
+  #playerHost{ flex:1 1 auto; position:relative; min-height:0; background:#000; }
+  /* YT.Player підставляє свій iframe з width=640 height=360 — перебиваємо абсолютом */
+  #playerHost iframe, #playerHost > div{
+    position:absolute; top:0; left:0; width:100%; height:100%;
+    border:none; display:block;
+  }
+  #playerHost:-webkit-full-screen{ width:100vw; height:100vh; }
+  #playerHost:fullscreen{ width:100vw; height:100vh; }
+
+  #playerMsg{ display:none; flex:1; align-items:center; justify-content:center;
+              text-align:center; padding:40px; font-size:34px; line-height:1.4; }
+</style>
+</head>
+<body>
+
+<header>
+  <input id="search" type="text" placeholder="Пошук відео..." autocomplete="off">
+  <div id="chips"></div>
+</header>
+
+<div id="grid"></div>
+<div id="status"></div>
+
+<div id="player">
+  <button id="backBtn">← Назад</button>
+  <div id="playerHost"></div>
+  <div id="playerMsg"></div>
+  <button id="fsBtn">⛶ На весь екран</button>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // Перевірено 2026-07-20: з публічних інстансів лише перший віддає JSON + CORS.
+  // Решта — резерв (403/Anubis/502 на момент перевірки, можуть ожити).
+  var INSTANCES = [
+    "https://yt.chocolatemoo53.com",
+    "https://invidious.nerdvpn.de",
+    "https://inv.nadeko.net",
+    "https://invidious.tiekoetter.com",
+    "https://invidious.f5.si",
+    "https://invidious.privacyredirect.com"
+  ];
+  var CHIPS = [
+    "africa online","africa online camera","тварини африка","відео природа",
+    "сафарі наживо","дика природа 4k","океан наживо","космос nasa live",
+    "гори природа 4k","ліс звуки природи"
+  ];
+  var DEFAULT_QUERY = "africa online";
+  var TIMEOUT = 4000;
+
+  var $ = function(id){ return document.getElementById(id); };
+  var grid = $("grid"), status = $("status"), searchEl = $("search");
+  var state = { query:"", page:1, loading:false, done:false };
+
+  // --- Invidious з fallback + кеш робочого інстансу ---
+  function orderedInstances(){
+    var cached = null;
+    try { cached = localStorage.getItem("inv_instance"); } catch(e){}
+    if(cached && INSTANCES.indexOf(cached) !== -1){
+      return [cached].concat(INSTANCES.filter(function(i){ return i!==cached; }));
+    }
+    return INSTANCES.slice();
+  }
+
+  // XHR замість fetch/AbortController — працює і в старих TV-браузерах
+  function getJSON(url, onOk, onErr){
+    var xhr = new XMLHttpRequest();
+    var done = false;
+    function fail(){ if(!done){ done = true; onErr(); } }
+    xhr.open("GET", url, true);
+    xhr.timeout = TIMEOUT;
+    xhr.onload = function(){
+      if(done) return;
+      done = true;
+      if(xhr.status < 200 || xhr.status >= 300) return onErr();
+      var data;
+      try { data = JSON.parse(xhr.responseText); } catch(e){ return onErr(); }
+      onOk(data);
+    };
+    xhr.onerror = fail;
+    xhr.ontimeout = fail;
+    // старі движки інколи ігнорують xhr.timeout — підстраховка
+    setTimeout(function(){ if(!done){ try{ xhr.abort(); }catch(e){} fail(); } }, TIMEOUT + 500);
+    try { xhr.send(); } catch(e){ fail(); }
+  }
+
+  // Пробує інстанси по черзі, поки один не відповість
+  function searchInvidious(query, page, onOk, onErr){
+    var list = orderedInstances();
+    var i = 0;
+    (function next(){
+      if(i >= list.length) return onErr();
+      var base = list[i++];
+      var url = base + "/api/v1/search?q=" + encodeURIComponent(query) +
+                "&page=" + page + "&type=video";
+      getJSON(url, function(data){
+        if(!(data instanceof Array)) return next();
+        try { localStorage.setItem("inv_instance", base); } catch(e){}
+        onOk(data, base); // base потрібен для відносних URL прев'ю
+      }, next);
+    })();
+  }
+
+  // --- Рендер ---
+  function ytimg(id, q){ return "https://i.ytimg.com/vi/"+id+"/"+q+".jpg"; }
+
+  // Інстанси віддають або повний URL, або відносний шлях "/vi/ID/mqdefault.jpg".
+  // Відносний треба клеїти до домену ТОГО інстансу, з якого прийшла відповідь.
+  function thumbUrl(v, base){
+    var list = (v.videoThumbnails instanceof Array) ? v.videoThumbnails : [];
+    var pick = null, i;
+    for(i=0; i<list.length && !pick; i++) if(list[i] && list[i].quality === "medium") pick = list[i].url;
+    for(i=0; i<list.length && !pick; i++) if(list[i] && list[i].quality === "high")   pick = list[i].url;
+    for(i=0; i<list.length && !pick; i++) if(list[i] && list[i].url)                  pick = list[i].url;
+    if(!pick) return ytimg(v.videoId, "mqdefault");        // немає прев'ю -> одразу YouTube CDN
+    if(pick.indexOf("//") === 0)   return "https:" + pick; // protocol-relative
+    if(pick.indexOf("http") === 0) return pick;            // вже повний
+    if(pick.charAt(0) === "/")     return (base || "") + pick;
+    return pick;
+  }
+
+  // Ланцюжок фолбеків: інстанс -> ytimg mqdefault -> ytimg hqdefault -> плейсхолдер (null)
+  function nextThumb(step, videoId){
+    if(step === 0) return ytimg(videoId, "mqdefault");
+    if(step === 1) return ytimg(videoId, "hqdefault");
+    return null;
+  }
+  function attachThumbFallback(img, videoId){
+    var step = 0;
+    img.onerror = function(){
+      var next;
+      // пропускаємо URL, який щойно впав (напр. коли прев'ю вже було з ytimg)
+      do { next = nextThumb(step++, videoId); } while(next && next === img.getAttribute("src"));
+      if(next){ img.setAttribute("src", next); return; }
+      img.onerror = null;
+      img.style.display = "none";
+      if(img.parentNode) img.parentNode.className = "thumb noimg"; // сірий плейсхолдер
+    };
+  }
+  function fmtDur(s){
+    if(!s || s<0) return "LIVE"; // трансляції віддають lengthSeconds:0
+    var h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=s%60;
+    function p(n){ return n<10?"0"+n:""+n; }
+    return h>0 ? h+":"+p(m)+":"+p(sec) : m+":"+p(sec);
+  }
+
+  function renderCards(videos, base){
+    var blocked = blockedIds(); // читаємо localStorage раз на пачку, не на кожну картку
+    videos.forEach(function(v){
+      if(v.type && v.type!=="video") return;
+      if(!v.videoId) return;
+      if(blocked.indexOf(v.videoId) !== -1) return; // недоступні не показуємо
+      var card = document.createElement("button");
+      card.className = "card";
+      card.setAttribute("tabindex","0");
+      card.setAttribute("data-vid", v.videoId);
+      card.innerHTML =
+        '<div class="thumb"><img loading="lazy" src="'+escapeHtml(thumbUrl(v, base))+'" alt="">'+
+        '<span class="dur">'+fmtDur(v.lengthSeconds)+'</span></div>'+
+        '<div class="meta"><div class="vtitle">'+escapeHtml(v.title||"")+'</div>'+
+        '<div class="vchan">'+escapeHtml(v.author||"")+'</div></div>';
+      card.addEventListener("click", function(){ openPlayer(v.videoId); });
+      grid.appendChild(card);
+      var img = card.querySelector && card.querySelector("img");
+      if(img) attachThumbFallback(img, v.videoId);
+    });
+  }
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g,function(c){
+      return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+    });
+  }
+
+  // --- Пошук / infinite scroll ---
+  function doSearch(query){
+    state.query = query; state.page = 1; state.done = false; state.loading = false;
+    grid.innerHTML = "";
+    status.textContent = "Завантаження...";
+    loadPage(true);
+  }
+
+  function loadPage(isFirst){
+    if(state.loading || state.done) return;
+    state.loading = true;
+    if(!isFirst) status.textContent = "Завантаження...";
+    searchInvidious(state.query, state.page, function(data, base){
+      state.loading = false;
+      if(!data.length){ state.done = true; status.textContent = isFirst ? "Нічого не знайдено" : ""; return; }
+      renderCards(data, base);
+      state.page++;
+      status.textContent = "";
+      if(isFirst) focusFirstCard();
+    }, function(){
+      state.loading = false;
+      status.textContent = "Сервіс тимчасово недоступний, спробуйте пізніше";
+    });
+  }
+
+  window.addEventListener("scroll", function(){
+    if($("player").classList.contains("open")) return;
+    if(window.innerHeight + window.scrollY >= document.body.offsetHeight - 800){
+      loadPage(false);
+    }
+  });
+
+  // --- Чорний список недоступних відео ---
+  var BLOCK_KEY = "yt_blocked";
+  function blockedIds(){
+    try { var l = JSON.parse(localStorage.getItem(BLOCK_KEY)); return l instanceof Array ? l : []; }
+    catch(e){ return []; }
+  }
+  function blockVideo(id){
+    var l = blockedIds();
+    if(l.indexOf(id) === -1){
+      l.push(id);
+      try { localStorage.setItem(BLOCK_KEY, JSON.stringify(l)); } catch(e){}
+    }
+  }
+  // 101/150 — власник заборонив вбудовування, 100 — видалено/приватне, 2 — невалідний id
+  function shouldBlock(code){ return [2,100,101,150].indexOf(Number(code)) !== -1; }
+  function ytErrorText(code){
+    return shouldBlock(code) ? "Це відео недоступне для перегляду тут"
+                             : "Не вдалося відтворити відео";
+  }
+
+  // --- Плеєр ---
+  var host = $("playerHost"), msgEl = $("playerMsg");
+  var yt = null, apiReady = false;
+
+  // Офіційний IFrame API. Не завантажиться — працюємо на голому iframe.
+  window.onYouTubeIframeAPIReady = function(){ apiReady = true; };
+  (function loadYTApi(){
+    var s = document.createElement("script");
+    s.src = "https://www.youtube.com/iframe_api";
+    s.onerror = function(){ apiReady = false; };
+    document.head.appendChild(s);
+  })();
+
+  function showMsg(text){
+    msgEl.textContent = text;
+    msgEl.style.display = "flex";
+    host.style.display = "none";
+    $("fsBtn").style.display = "none"; // нема чого розгортати — плеєра немає
+    $("backBtn").focus();
+  }
+  function hideMsg(){
+    msgEl.style.display = "none";
+    host.style.display = "block";
+    $("fsBtn").style.display = "block";
+  }
+
+  function handleYTError(videoId, code){
+    if(shouldBlock(code)){
+      blockVideo(videoId);
+      // прибираємо картку з поточної сітки, щоб не клікнули ще раз
+      var card = grid.querySelector('[data-vid="'+videoId+'"]');
+      if(card) card.parentNode.removeChild(card);
+    }
+    showMsg(ytErrorText(code));
+  }
+
+  function fallbackIframe(videoId){
+    host.innerHTML = '<iframe allow="autoplay; encrypted-media" allowfullscreen '+
+      'src="https://www.youtube-nocookie.com/embed/'+videoId+'?autoplay=1&rel=0"></iframe>';
+  }
+
+  function openPlayer(videoId){
+    hideMsg();
+    $("player").classList.add("open");
+    $("backBtn").focus();
+    host.innerHTML = '<div id="ytmount"></div>';
+    if(apiReady && window.YT && window.YT.Player){
+      try {
+        yt = new window.YT.Player("ytmount", {
+          videoId: videoId,
+          host: "https://www.youtube-nocookie.com",
+          width: "100%", height: "100%",
+          playerVars: { autoplay:1, rel:0 },
+          events: {
+            onReady: function(e){ try { e.target.playVideo(); } catch(err){} },
+            onError: function(e){ handleYTError(videoId, e.data); }
+          }
+        });
+        return;
+      } catch(err){ /* падаємо у fallback нижче */ }
+    }
+    fallbackIframe(videoId); // ponytail: без API помилки embed не ловляться
+  }
+
+  function closePlayer(){
+    $("player").classList.remove("open");
+    if(yt && yt.destroy){ try { yt.destroy(); } catch(e){} }
+    yt = null;
+    host.innerHTML = ""; // зупиняємо відтворення
+    hideMsg();
+  }
+  $("backBtn").addEventListener("click", closePlayer);
+
+  // Fullscreen саме на контейнері плеєра (з префіксами для старих движків)
+  $("fsBtn").addEventListener("click", function(){
+    var fn = host.requestFullscreen || host.webkitRequestFullscreen ||
+             host.webkitRequestFullScreen || host.msRequestFullscreen;
+    if(fn){ try { fn.call(host); } catch(e){} }
+  });
+
+  // --- Chips ---
+  var chipsEl = $("chips");
+  CHIPS.forEach(function(text){
+    var b = document.createElement("button");
+    b.className = "chip"; b.textContent = text; b.setAttribute("tabindex","0");
+    b.addEventListener("click", function(){ searchEl.value = text; doSearch(text); focusFirstCard(); });
+    chipsEl.appendChild(b);
+  });
+
+  searchEl.addEventListener("keydown", function(e){
+    if(e.key === "Enter" && searchEl.value.trim()){ doSearch(searchEl.value.trim()); }
+  });
+
+  // --- Навігація пультом: просторова (spatial) по стрілках ---
+  function focusables(){
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#search,.chip,.card,#backBtn")
+    ).filter(function(el){ return el.offsetParent !== null; });
+  }
+  function focusFirstCard(){
+    var c = grid.querySelector(".card");
+    if(c) c.focus();
+  }
+
+  function spatialMove(dir){
+    var cur = document.activeElement;
+    var items = focusables();
+    if(items.indexOf(cur) === -1){ if(items[0]) items[0].focus(); return; }
+    var r = cur.getBoundingClientRect();
+    var cx = r.left + r.width/2, cy = r.top + r.height/2;
+    var best = null, bestScore = Infinity;
+    items.forEach(function(el){
+      if(el === cur) return;
+      var b = el.getBoundingClientRect();
+      var ex = b.left + b.width/2, ey = b.top + b.height/2;
+      var dx = ex - cx, dy = ey - cy;
+      var ok = (dir==="right"&&dx>10)||(dir==="left"&&dx<-10)||
+               (dir==="down"&&dy>10)||(dir==="up"&&dy<-10);
+      if(!ok) return;
+      // основна вісь + штраф за відхилення по перпендикуляру
+      var primary = (dir==="left"||dir==="right") ? Math.abs(dx) : Math.abs(dy);
+      var cross   = (dir==="left"||dir==="right") ? Math.abs(dy) : Math.abs(dx);
+      var score = primary + cross*2;
+      if(score < bestScore){ bestScore = score; best = el; }
+    });
+    if(best) best.focus();
+  }
+
+  // У текстовому полі стрілки належать курсору, а не навігації.
+  // Виняток — ArrowDown: вниз із пошуку йдемо на chips (курсору в
+  // однорядковому input вертикаль все одно ні до чого).
+  function isTextInput(el){
+    return !!el && el.tagName === "INPUT";
+  }
+  function shouldHandleArrow(key, inTextInput){
+    if(!inTextInput) return true;
+    return key === "ArrowDown";
+  }
+
+  document.addEventListener("keydown", function(e){
+    if($("player").classList.contains("open")){
+      // у fullscreen Escape має лише виходити з нього, а не закривати плеєр
+      var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if(e.key==="Escape" && fsEl) return;
+      if(e.key==="Backspace" || e.key==="Escape"){ e.preventDefault(); closePlayer(); return; }
+      // фокус ходить лише між двома кнопками екрана відтворення,
+      // spatialMove тут не годиться — за оверлеєм лишається сітка
+      if(e.key==="ArrowDown"){ e.preventDefault(); $("fsBtn").focus(); return; }
+      if(e.key==="ArrowUp"){ e.preventDefault(); $("backBtn").focus(); return; }
+      return;
+    }
+    if(e.key.indexOf("Arrow") === 0 &&
+       !shouldHandleArrow(e.key, isTextInput(document.activeElement))){
+      return; // без preventDefault — браузер сам рухає курсор
+    }
+    switch(e.key){
+      case "ArrowRight": e.preventDefault(); spatialMove("right"); break;
+      case "ArrowLeft":  e.preventDefault(); spatialMove("left");  break;
+      case "ArrowUp":    e.preventDefault(); spatialMove("up");    break;
+      case "ArrowDown":  e.preventDefault(); spatialMove("down");  break;
+      case "Enter":
+        if(document.activeElement && document.activeElement.classList.contains("card")){
+          document.activeElement.click();
+        }
+        break;
+    }
+  });
+
+  // --- Старт ---
+  searchEl.value = DEFAULT_QUERY;
+  doSearch(DEFAULT_QUERY);
+})();
+</script>
+</body>
+</html>
