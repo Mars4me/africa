@@ -327,6 +327,11 @@
 
   function openPlayer(videoId){
     hideMsg();
+    // окремий запис в історії — апаратна "Назад" на пульті шле popstate,
+    // і ми перехоплюємо його замість виходу зі сторінки застосунку
+    if(window.history && window.history.pushState){
+      try { window.history.pushState({ player: videoId }, "", ""); } catch(e){}
+    }
     $("player").classList.add("open");
     $("backBtn").focus();
     host.innerHTML = '<div id="ytmount"></div>';
@@ -356,7 +361,43 @@
     host.innerHTML = ""; // зупиняємо відтворення
     hideMsg();
   }
-  $("backBtn").addEventListener("click", closePlayer);
+  // Єдиний вихід із плеєра для всього UI. Йде через history.back(), щоб
+  // не лишався зайвий запис: реальне закриття робить popstate нижче.
+  // Порядок на пульті: перша "Назад" виходить із fullscreen, друга — на список.
+  function goBack(){
+    var fsEl = document.fullscreenElement || document.webkitFullscreenElement ||
+               document.msFullscreenElement;
+    if(fsEl){
+      var ex = document.exitFullscreen || document.webkitExitFullscreen ||
+               document.msExitFullscreen;
+      if(ex){ try { ex.call(document); } catch(e){} }
+      return;
+    }
+    if(!$("player").classList.contains("open")) return;
+    if(window.history && window.history.state && window.history.state.player){
+      window.history.back();   // -> popstate -> closePlayer()
+    } else {
+      closePlayer();           // історія недоступна (старий движок) — закриваємо напряму
+    }
+  }
+  $("backBtn").addEventListener("click", goBack);
+
+  // Апаратна "Назад" на пульті / жест назад у браузері
+  window.addEventListener("popstate", function(){
+    if($("player").classList.contains("open")) closePlayer();
+  });
+
+  // Кнопка "Дім"/згортання застосунку до браузера зазвичай не долітає —
+  // ловимо через visibilitychange, щоб відео не грало у фоні.
+  // ponytail: якщо на конкретному TV "Дім" усе ж шле keydown — дізнатись
+  // його код (console.log(e.keyCode) у обробнику keydown нижче) і додати
+  // сюди умову виду: if(e.keyCode === 10182) pauseVideo();
+  function pauseVideo(){
+    if(yt && yt.pauseVideo){ try { yt.pauseVideo(); } catch(e){} }
+  }
+  document.addEventListener("visibilitychange", function(){
+    if(document.hidden) pauseVideo();
+  });
 
   // Fullscreen саме на контейнері плеєра (з префіксами для старих движків)
   $("fsBtn").addEventListener("click", function(){
@@ -382,14 +423,21 @@
     chipsEl.appendChild(b);
   });
 
-  // Панель видно, лише поки фокус у полі пошуку або на самій підказці.
+  // Фокус (стрілки пульта) лише підсвічує поле. Панель підказок — це вже
+  // "активація": Enter/OK або клік. Інакше проліт стрілками через хедер
+  // щоразу розгортав chips і зсував сітку.
+  function activate(){ searchEl.className = "active"; showChips(); }
+  function deactivate(){ searchEl.className = ""; hideChips(); }
+  function isActive(){ return searchEl.className === "active"; }
+
   // focus не спливає, тому слухаємо у фазі перехоплення (працює й у старих движках).
   document.addEventListener("focus", function(e){
     var t = e.target;
-    if(t === searchEl || (t && t.className === "chip")) showChips();
-    else hideChips();
+    // сам фокус на полі нічого не вмикає; фокус на chip зберігає активний стан
+    if(t === searchEl || (t && t.className === "chip")) return;
+    deactivate();
   }, true);
-  searchEl.addEventListener("click", showChips);
+  searchEl.addEventListener("click", activate);
 
   // Запобіжник: у розмітці зараз немає жодного <a>, але якщо колись
   // з'явиться посилання назовні — воно не має вивести з застосунку.
@@ -402,8 +450,14 @@
   }, true);
 
   searchEl.addEventListener("keydown", function(e){
-    if(e.key === "Enter" && searchEl.value.trim()){ hideChips(); doSearch(searchEl.value.trim()); }
-    if(e.key === "Escape"){ hideChips(); focusFirstCard(); } // вихід із пошуку до сітки
+    if(!isActive()){
+      // перше Enter/OK (або Space) лише вмикає режим вводу, не шукає
+      if(e.key === "Enter" || e.key === " "){ e.preventDefault(); activate(); }
+      if(e.key === "Escape"){ focusFirstCard(); } // з неактивного поля — до сітки
+      return;
+    }
+    if(e.key === "Enter" && searchEl.value.trim()){ deactivate(); doSearch(searchEl.value.trim()); }
+    if(e.key === "Escape"){ deactivate(); } // назад до звичайного фокуса на полі
   });
 
   // --- Навігація пультом: просторова (spatial) по стрілках ---
@@ -454,10 +508,9 @@
 
   document.addEventListener("keydown", function(e){
     if($("player").classList.contains("open")){
-      // у fullscreen Escape має лише виходити з нього, а не закривати плеєр
-      var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-      if(e.key==="Escape" && fsEl) return;
-      if(e.key==="Backspace" || e.key==="Escape"){ e.preventDefault(); closePlayer(); return; }
+      // Escape/Backspace — те, що шлють TV-браузери замість справжньої "Назад".
+      // goBack() сам вирішує: спершу вихід із fullscreen, далі — на список.
+      if(e.key==="Backspace" || e.key==="Escape"){ e.preventDefault(); goBack(); return; }
       // фокус ходить лише між двома кнопками екрана відтворення,
       // spatialMove тут не годиться — за оверлеєм лишається сітка
       if(e.key==="ArrowDown"){ e.preventDefault(); $("fsBtn").focus(); return; }
