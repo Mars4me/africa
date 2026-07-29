@@ -405,25 +405,34 @@ console.log("ok сітка/Escape ховають chips");
 
 // склад списку підказок
 const chipsSrc = /var CHIPS = \[([\s\S]*?)\];/.exec(html)[1];
-const chipList = (chipsSrc.match(/"([^"]+)"/g) || []).map(s => s.slice(1,-1));
-["ліс звуки природи","космос nasa live"].forEach(t =>
-  assert.ok(!chipList.includes(t), "підказку \"" + t + "\" треба було прибрати"));
+const chipPairs = [...chipsSrc.matchAll(/label:\s*"([^"]+)"\s*,\s*query:\s*"([^"]+)"/g)]
+  .map(m => ({ label: m[1], query: m[2] }));
+const chipList = chipPairs.map(c => c.label);
+["ліс звуки природи","космос nasa live","дика природа 4k","океан наживо","гори природа 4k"]
+  .forEach(t => assert.ok(!chipList.includes(t), "підказку \"" + t + "\" треба було прибрати"));
 ["домашні рецепти","рецепти дома"].forEach(t =>
   assert.ok(chipList.includes(t), "підказки \"" + t + "\" бракує"));
-// перші три — англомовні тематичні запити, у точному порядку
-assert.deepStrictEqual(chipList.slice(0, 3),
-  ["africa online", "africam", "africa camera online"],
-  "список має починатись саме з цих трьох підказок у цьому порядку");
-// решта — у попередньому порядку, одразу після них
-assert.deepStrictEqual(chipList.slice(3),
-  ["тварини африка","відео природа","сафарі наживо","дика природа 4k",
-   "океан наживо","гори природа 4k","домашні рецепти","рецепти дома"],
-  "решта підказок має лишитись у попередньому порядку");
+// повний список у точному порядку: label -> query
+assert.deepStrictEqual(chipPairs, [
+  { label:"africa online", query:"africa online" },
+  { label:"africam", query:"africam" },
+  { label:"africa camera online", query:"africa camera online" },
+  { label:"В'єтнам сільське життя", query:"vietnam countryside life" },
+  { label:"Ферма В'єтнам врожай", query:"farm life vietnam harvest" },
+  { label:"Життя на фермі", query:"rural life vlog" },
+  { label:"Збір врожаю на ринок", query:"harvest and go to market" },
+  { label:"Чук Зионг харвестінг", query:"Chuc Duong Harvesting" },
+  { label:"тварини африка", query:"тварини африка" },
+  { label:"відео природа", query:"відео природа" },
+  { label:"сафарі наживо", query:"сафарі наживо" },
+  { label:"домашні рецепти", query:"домашні рецепти" },
+  { label:"рецепти дома", query:"рецепти дома" }
+], "склад і порядок підказок (label/query) має бути саме таким");
 // автопошук на старті — фіксований запит, не обов'язково перший chip
 const defaultQuery = /var DEFAULT_QUERY = "([^"]+)"/.exec(html)[1];
 assert.strictEqual(defaultQuery, "africa camera online",
   "дефолтний запит при завантаженні має лишатись \"africa camera online\"");
-assert.ok(chipList.includes(defaultQuery),
+assert.ok(chipPairs.some(c => c.query === defaultQuery),
   "дефолтний запит має бути серед підказок, щоб його можна було повторити з пульта");
 console.log("ok список підказок (" + chipList.length + ", перші три + DEFAULT_QUERY)");
 

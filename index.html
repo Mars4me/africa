@@ -106,10 +106,21 @@
   var WORKER_URL = "https://winter-star-48dc.sweaterbaddy.workers.dev";
 
   // Ротація дзеркал і CORS живуть у Worker'і — клієнт про них не знає.
+  // label — те, що видно на кнопці; query — те, що йде в пошук
   var CHIPS = [
-    "africa online","africam","africa camera online",
-    "тварини африка","відео природа","сафарі наживо","дика природа 4k",
-    "океан наживо","гори природа 4k","домашні рецепти","рецепти дома"
+    { label:"africa online", query:"africa online" },
+    { label:"africam", query:"africam" },
+    { label:"africa camera online", query:"africa camera online" },
+    { label:"В'єтнам сільське життя", query:"vietnam countryside life" },
+    { label:"Ферма В'єтнам врожай", query:"farm life vietnam harvest" },
+    { label:"Життя на фермі", query:"rural life vlog" },
+    { label:"Збір врожаю на ринок", query:"harvest and go to market" },
+    { label:"Чук Зионг харвестінг", query:"Chuc Duong Harvesting" },
+    { label:"тварини африка", query:"тварини африка" },
+    { label:"відео природа", query:"відео природа" },
+    { label:"сафарі наживо", query:"сафарі наживо" },
+    { label:"домашні рецепти", query:"домашні рецепти" },
+    { label:"рецепти дома", query:"рецепти дома" }
   ];
   // Запит для автопошуку на старті. У полі не показується (там placeholder),
   // тому англійська тут не змішує мови в інтерфейсі.
@@ -411,13 +422,13 @@
   function showChips(){ chipsEl.className = "open"; }
   function hideChips(){ chipsEl.className = ""; }
 
-  CHIPS.forEach(function(text){
+  CHIPS.forEach(function(chip){
     var b = document.createElement("button");
-    b.className = "chip"; b.textContent = text; b.setAttribute("tabindex","0");
+    b.className = "chip"; b.textContent = chip.label; b.setAttribute("tabindex","0");
     b.addEventListener("click", function(){
-      searchEl.value = text;
+      searchEl.value = chip.label;
       hideChips();
-      doSearch(text);
+      doSearch(chip.query);
       focusFirstCard();
     });
     chipsEl.appendChild(b);
