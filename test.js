@@ -72,12 +72,14 @@ assert.strictEqual(shouldHandleArrow("ArrowDown",  true),  true,  "Down в input
 console.log("ok arrow guard");
 
 // той самий guard справді стоїть у index.html перед preventDefault
-assert.match(html, /shouldHandleArrow\(e\.key,\s*isTextInput\(document\.activeElement\)\)/,
+// index.html форматують prettier'ом (лапки, пробіли, переноси), тому скрізь
+// нижче лапки — ['"], а пробіли — \s*, а не точний рядок
+assert.match(html, /shouldHandleArrow\(\s*e\.key,\s*isTextInput\(document\.activeElement\)\s*\)/,
   "guard не підключений до обробника keydown");
 // guard має стояти перед гілкою стрілок (перший preventDefault — це Escape плеєра, він раніше і це ок)
-const handler = html.slice(html.indexOf('document.addEventListener("keydown"'));
+const handler = html.slice(html.search(/document\.addEventListener\(\s*['"]keydown['"]/));
 const guardPos = handler.indexOf("shouldHandleArrow");
-const arrowPos = handler.indexOf('case "ArrowRight"');
+const arrowPos = handler.search(/case ['"]ArrowRight['"]/);
 assert.ok(guardPos > -1 && arrowPos > -1 && guardPos < arrowPos,
   "guard має спрацьовувати ДО preventDefault на стрілках");
 console.log("ok guard підключений перед preventDefault");
@@ -320,10 +322,17 @@ assert.strictEqual(appEmpty.els.chips.className, "",
 console.log("ok chip ховає панель навіть без результатів");
 
 // саме CSS ховає панель за замовчуванням, а не лише JS-клас
-const chipsCss = /#chips\{([^}]*)\}/.exec(html)[1];
-const chipCss  = /\.chip\{([^}]*)\}/.exec(html)[1];
+// index.html проганяють через prettier, тож CSS буває і "#chips{...}", і
+// "#chips {\n  display: none;\n}" — селектор шукаємо з довільними пробілами.
+function cssRule(sel){
+  const m = new RegExp(sel.replace(/\./g, "\\.") + "\\s*\\{([^}]*)\\}").exec(html);
+  assert.ok(m, "не знайдено CSS-правило \"" + sel + "\"");
+  return m[1];
+}
+const chipsCss = cssRule("#chips");
+const chipCss  = cssRule(".chip");
 assert.match(chipsCss, /display:\s*none/, "#chips має бути display:none за замовчуванням");
-assert.match(html, /#chips\.open\{[^}]*display:\s*(block|flex)/, "#chips.open має показувати панель");
+assert.match(cssRule("#chips.open"), /display:\s*(block|flex)/, "#chips.open має показувати панель");
 console.log("ok CSS ховає chips за замовчуванням");
 
 // панель переноситься на новий рядок і не вилазить за екран
@@ -352,14 +361,15 @@ for(const [, sel, body] of html.matchAll(/([^{}]+)\{([^}]*)\}/g)){
   assert.ok(!/transform:\s*scale/.test(body),
     "scale у правилі \"" + sel.trim() + "\" розтягує поле шириною 100% за межі екрана");
 }
-assert.match(/#search\{([^}]*)\}/.exec(html)[1], /width:\s*100%/,
+const searchCss = cssRule("#search");
+assert.match(searchCss, /width:\s*100%/,
   "#search має тягнутись по батьку, а не мати фіксовану ширину");
-assert.ok(!/#search\{[^}]*(min-width|width):\s*\d+px/.test(html),
+assert.ok(!/(min-width|width):\s*\d+px/.test(searchCss),
   "фіксована/мінімальна ширина в px у #search вилізе за вузький екран");
 console.log("ok поле пошуку не виходить за екран при фокусі");
 
 // сітка не перекривається: header у потоці (sticky), а не fixed
-assert.match(html, /header\{[^}]*position:\s*sticky/,
+assert.match(cssRule("header"), /position:\s*sticky/,
   "header має бути sticky — fixed вийняв би його з потоку і сітка полізла б під нього");
 console.log("ok header у потоці -> сітка зсувається вниз");
 
@@ -404,32 +414,41 @@ assert.ok(!isOpen(), "Escape має сховати chips");
 console.log("ok сітка/Escape ховають chips");
 
 // склад списку підказок
+// prettier ставить одинарні лапки, а для рядків з апострофом ("В'єтнам") —
+// подвійні, тому лапки читаємо як ['"] і не прив'язуємось до конкретних
 const chipsSrc = /var CHIPS = \[([\s\S]*?)\];/.exec(html)[1];
-const chipPairs = [...chipsSrc.matchAll(/label:\s*"([^"]+)"\s*,\s*query:\s*"([^"]+)"/g)]
-  .map(m => ({ label: m[1], query: m[2] }));
+const STR = "(?:\"([^\"]*)\"|'([^']*)')";
+const chipPairs = [...chipsSrc.matchAll(
+  new RegExp("label:\\s*" + STR + "\\s*,\\s*query:\\s*" + STR, "g"))]
+  .map(m => ({ label: m[1] !== undefined ? m[1] : m[2],
+               query: m[3] !== undefined ? m[3] : m[4] }));
 const chipList = chipPairs.map(c => c.label);
+assert.ok(chipPairs.length >= 5, "підказки мають парситись як {label, query}");
+assert.ok(chipPairs.every(c => c.label && c.query),
+  "у кожної підказки має бути і label (на кнопці), і query (у пошук)");
 ["ліс звуки природи","космос nasa live","дика природа 4k","океан наживо","гори природа 4k"]
   .forEach(t => assert.ok(!chipList.includes(t), "підказку \"" + t + "\" треба було прибрати"));
 ["домашні рецепти","рецепти дома"].forEach(t =>
   assert.ok(chipList.includes(t), "підказки \"" + t + "\" бракує"));
-// повний список у точному порядку: label -> query
-assert.deepStrictEqual(chipPairs, [
-  { label:"africa online", query:"africa online" },
-  { label:"africam", query:"africam" },
-  { label:"africa camera online", query:"africa camera online" },
-  { label:"В'єтнам сільське життя", query:"vietnam countryside life" },
-  { label:"Ферма В'єтнам врожай", query:"farm life vietnam harvest" },
-  { label:"Життя на фермі", query:"rural life vlog" },
-  { label:"Збір врожаю на ринок", query:"harvest and go to market" },
-  { label:"Чук Зионг харвестінг", query:"Chuc Duong Harvesting" },
-  { label:"тварини африка", query:"тварини африка" },
-  { label:"відео природа", query:"відео природа" },
-  { label:"сафарі наживо", query:"сафарі наживо" },
-  { label:"домашні рецепти", query:"домашні рецепти" },
-  { label:"рецепти дома", query:"рецепти дома" }
-], "склад і порядок підказок (label/query) має бути саме таким");
+// Склад/порядок списку власник міняє вручну, тому фіксуємо не весь масив,
+// а лише пари, де label українською, а query — англійський пошуковий рядок
+Object.entries({
+  "В'єтнам сільське життя": "vietnam countryside life",
+  "Ферма В'єтнам врожай":   "farm life vietnam harvest",
+  "Життя на фермі":         "rural life vlog",
+  "Збір врожаю на ринок":   "harvest and go to market",
+  "Чук Зионг харвестінг":   "Chuc Duong Harvesting",
+  "канал вєтнамця":         "Chuc Duong Harvesting", // був опечатаний query
+}).forEach(([label, query]) => {
+  const c = chipPairs.find(x => x.label === label);
+  assert.ok(c, "бракує підказки \"" + label + "\"");
+  assert.strictEqual(c.query, query, "\"" + label + "\" має шукати \"" + query + "\"");
+});
+// перші три — англомовні тематичні запити (порядок між ними не важливий)
+["africa online", "africam", "africa camera online"].forEach(t =>
+  assert.ok(chipList.slice(0, 4).includes(t), "\"" + t + "\" має бути на початку списку"));
 // автопошук на старті — фіксований запит, не обов'язково перший chip
-const defaultQuery = /var DEFAULT_QUERY = "([^"]+)"/.exec(html)[1];
+const defaultQuery = /var DEFAULT_QUERY = ['"]([^'"]+)['"]/.exec(html)[1];
 assert.strictEqual(defaultQuery, "africa camera online",
   "дефолтний запит при завантаженні має лишатись \"africa camera online\"");
 assert.ok(chipPairs.some(c => c.query === defaultQuery),
@@ -616,7 +635,7 @@ const external = anchors.filter(a => /href\s*=\s*["']https?:/i.test(a));
 assert.deepStrictEqual(external, [],
   "знайдено <a> на зовнішній домен: " + external.join(", "));
 // а якщо колись з'явиться — має спрацювати делегований перехоплювач
-assert.match(html, /if\(\/\^https\?:\/i\.test\(href\)\)\{ e\.preventDefault\(\); \}/,
+assert.match(html, /\/\^https\?:\/i\.test\(href\)\)\s*\{?\s*e\.preventDefault\(\);/,
   "потрібен глобальний перехоплювач кліків по зовнішніх посиланнях");
 console.log("ok немає <a> назовні (" + anchors.length + " всього) + перехоплювач");
 
@@ -626,7 +645,7 @@ assert.ok(!/window\.open\s*\(/.test(scriptOnly), "window.open не має вик
 console.log("ok немає window.open");
 
 // <base target="_self">
-assert.match(html, /<base\s+target="_self">/, "потрібен <base target=\"_self\">");
+assert.match(html, /<base\s+target="_self"\s*\/?>/, "потрібен <base target=\"_self\">");
 assert.ok(!/target\s*=\s*["']_blank["']/i.test(html), "не має бути target=\"_blank\"");
 console.log("ok base target=_self, немає _blank");
 
@@ -634,14 +653,15 @@ console.log("ok base target=_self, немає _blank");
 const FORBIDDEN = ["allow-top-navigation", "allow-top-navigation-by-user-activation",
                    "allow-top-navigation-to-custom-protocols", "allow-popups",
                    "allow-popups-to-escape-sandbox"];
-const sandboxVal = /var SANDBOX = "([^"]+)"/.exec(html)[1];
+const sandboxVal = /var SANDBOX = ['"]([^'"]+)['"]/.exec(html)[1];
 FORBIDDEN.forEach(t => assert.ok(!sandboxVal.split(/\s+/).includes(t),
   "sandbox не має містити " + t + ", маємо: " + sandboxVal));
 // але плеєр без цих двох просто не запуститься
 ["allow-scripts","allow-same-origin"].forEach(t =>
   assert.ok(sandboxVal.split(/\s+/).includes(t), "sandbox має містити " + t));
-assert.match(html, /<iframe sandbox="'\+SANDBOX\+'"/, "fallback-iframe має отримувати sandbox");
-assert.match(html, /f\.setAttribute\("sandbox", SANDBOX\)/, "iframe від YT.Player теж має блокуватись");
+assert.match(html, /<iframe sandbox="['"]\s*\+\s*SANDBOX/, "fallback-iframe має отримувати sandbox");
+assert.match(html, /f\.setAttribute\(\s*['"]sandbox['"],\s*SANDBOX\s*\)/,
+  "iframe від YT.Player теж має блокуватись");
 console.log("ok sandbox=\"" + sandboxVal + "\" (без top-navigation/popups)");
 
 // фактично відрендерений fallback-iframe містить sandbox і не містить забороненого
@@ -653,7 +673,7 @@ FORBIDDEN.forEach(t => assert.ok(!iframeHtml.includes(t), "у готовому i
 console.log("ok готовий iframe без top-navigation/popups");
 
 // --- 4. клієнт ходить лише у Worker, про дзеркала не знає ---
-assert.match(html, /var WORKER_URL = "[^"]+"/, "потрібна змінна WORKER_URL");
+assert.match(html, /var WORKER_URL = ['"][^'"]+['"]/, "потрібна змінна WORKER_URL");
 const invidiousInClient = (html.match(/https:\/\/[a-z0-9.\-]+/gi) || [])
   .filter(u => !/youtube-nocookie|ytimg|youtube\.com|workers\.dev/.test(u));
 assert.deepStrictEqual(invidiousInClient, [],
@@ -662,7 +682,8 @@ console.log("ok клієнт не знає про дзеркала");
 
 // запит іде на один ендпоінт Worker'а з q і page
 const BASE_URL = "https://winter-star-48dc.sweaterbaddy.workers.dev";
-assert.ok(html.includes('var WORKER_URL = "' + BASE_URL + '"'), "WORKER_URL має вказувати на Worker");
+assert.strictEqual(/var WORKER_URL = ['"]([^'"]+)['"]/.exec(html)[1], BASE_URL,
+  "WORKER_URL має вказувати на Worker");
 
 const appReq = makeApp(VIDS);
 const reqUrl = appReq.requests[0];
@@ -692,16 +713,23 @@ console.log("ok кодування кирилиці/пробілів у запи
 // а стаб не має ні прокрутки, ні розмірів. Перевірено вживу через curl.
 
 // помилка Worker'а ({"error":...}) -> зрозуміле повідомлення, не білий екран
-const appErr = makeApp({ error: "all_instances_down" });
+const appErr = makeApp({ error: "all instances unavailable" });
 assert.strictEqual(appErr.els.status.textContent,
   "Сервіс тимчасово недоступний, спробуйте пізніше");
 console.log("ok помилка Worker'а -> повідомлення користувачу");
 
 // --- 4b. worker.js ---
 const worker = fs.readFileSync(__dirname + "/worker.js", "utf8");
-const wInstances = (worker.match(/"https:\/\/[a-z0-9.\-]+"/gi) || []);
+const wInstancesSrc = /const INSTANCES = \[([\s\S]*?)\];/.exec(worker)[1];
+const wInstances = (wInstancesSrc.match(/"https:\/\/[a-z0-9.\-]+"/gi) || []);
 assert.ok(wInstances.length >= 4, "у Worker'і має бути 4+ дзеркал, знайдено " + wInstances.length);
-assert.match(worker, /Access-Control-Allow-Origin"?\s*:\s*"\*"/, "Worker має віддавати CORS *");
+// CORS більше не "*": білий список origin'ів, значення береться з запиту
+const wOrigins = (/const ALLOWED_ORIGINS = \[([\s\S]*?)\];/.exec(worker)[1].match(/"[^"]+"/g) || [])
+  .map(s => s.slice(1, -1));
+assert.deepStrictEqual(wOrigins,
+  ["https://mars4me.github.io", "http://127.0.0.1:5500", "http://localhost:5500"],
+  "білий список origin'ів: прод + Live Server (127.0.0.1 і localhost)");
+assert.match(worker, /headers\.get\("Origin"\)/, "origin має братись із вхідного запиту");
 assert.match(worker, /caches\.default/, "Worker має використовувати Cache API");
 assert.match(worker, /max-age=\$\{CACHE_TTL\}/, "відповідь має мати Cache-Control");
 console.log("ok worker.js: " + wInstances.length + " дзеркал, CORS, кеш");
@@ -712,11 +740,15 @@ async function runWorker({ upstream, cacheStore = new Map() }) {
   const calls = [];
   const sandbox = {
     console, URL, Request, Response, Headers, AbortController, Array, Number,
-    JSON, setTimeout, clearTimeout, encodeURIComponent, parseInt,
+    JSON, setTimeout, clearTimeout, encodeURIComponent, parseInt, Map, Date,
     fetch: async (u, opts) => {
       calls.push(u);
       const r = upstream(u);
       if (r === "fail") throw new Error("network");
+      // {html:"..."} — сторінка YouTube; усе інше — JSON дзеркала Invidious
+      if (r && r.html !== undefined) {
+        return new Response(r.html, { status: 200, headers: { "Content-Type": "text/html" } });
+      }
       return new Response(JSON.stringify(r), {
         status: 200, headers: { "Content-Type": "application/json" },
       });
@@ -731,23 +763,126 @@ async function runWorker({ upstream, cacheStore = new Map() }) {
   sandbox.globalThis = sandbox;
   require("vm").createContext(sandbox);
   require("vm").runInContext(src, sandbox);
-  return { w: sandbox.__W, calls, cacheStore };
+  return { w: sandbox.__W, calls, cacheStore, fn: sandbox };
 }
+
+// Сторінка результатів YouTube: у назві навмисно ";", "}" і "</script>" —
+// саме на них ламався би регекс "до першого ;".
+const YT_VIDEO = {
+  videoId: "S000000001",
+  title: { runs: [{ text: 'рецепт {домашній}; </script> ok' }] },
+  thumbnail: { thumbnails: [{ url: "https://i.ytimg.com/vi/S000000001/mq.jpg", width: 320, height: 180 }] },
+  ownerText: { runs: [{ text: "Канал" }] },
+  lengthText: { simpleText: "1:02:03" },
+  viewCountText: { simpleText: "1.2M views" },
+};
+const YT_LIVE = {
+  videoId: "S000000002",
+  title: { runs: [{ text: "стрім" }] },
+  thumbnail: { thumbnails: [{ url: "https://i.ytimg.com/vi/S000000002/mq.jpg" }] },
+  ownerText: { runs: [{ text: "Канал" }] },
+  viewCountText: { runs: [{ text: "1 234" }, { text: " watching" }] },
+  thumbnailOverlays: [{ thumbnailOverlayTimeStatusRenderer: { style: "LIVE" } }],
+};
+function ytPage(items) {
+  const data = { contents: { twoColumnSearchResultsRenderer: { primaryContents: {
+    sectionListRenderer: { contents: [
+      { itemSectionRenderer: { contents: items } },
+      { continuationItemRenderer: {} },            // секція без contents
+    ] },
+  } } } };
+  return { html: "<html><script>var ytInitialData = " + JSON.stringify(data) +
+                 ";</script><script>var other = {};</script></html>" };
+}
+const YT_OK = ytPage([
+  { channelRenderer: { channelId: "c1" } },        // не відео — має відсіятись
+  { videoRenderer: YT_VIDEO },
+  { videoRenderer: YT_LIVE },
+]);
+const isYT = (u) => u.includes("youtube.com/results");
 
 const VID_REL = [{ videoId: "W0000000001", title: "t",
                    videoThumbnails: [{ quality: "medium", url: "/vi/W0000000001/mqdefault.jpg" }] }];
 const ctx = { waitUntil: (p) => p };
+const LOCAL = "http://127.0.0.1:5500"; // origin Live Server'а з білого списку
 
 (async () => {
+  // основний спосіб: скрейп сторінки YouTube
+  {
+    const { w, calls } = await runWorker({ upstream: (u) => (isYT(u) ? YT_OK : "fail") });
+    const res = await w.fetch(
+      new Request("https://x/search?q=тест", { headers: { Origin: LOCAL } }), {}, ctx);
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.headers.get("X-Backend"), "yt-scrape", "має відповісти скрейп");
+    assert.strictEqual(calls.length, 1, "успішний скрейп не має чіпати Invidious");
+    assert.ok(calls[0].includes("sp=CAI%3D"), "має бути фільтр «тільки відео»");
+    const body = await res.json();
+    assert.strictEqual(body.length, 2, "channelRenderer має відсіятись");
+    assert.deepStrictEqual(body[0], {
+      videoId: "S000000001",
+      title: 'рецепт {домашній}; </script> ok',
+      videoThumbnails: [{ url: "https://i.ytimg.com/vi/S000000001/mq.jpg", width: 320, height: 180 }],
+      author: "Канал",
+      lengthSeconds: 3723,          // 1:02:03
+      viewCount: "1.2M views",
+      published: null,
+    }, "videoRenderer -> Invidious-подібний формат");
+    assert.strictEqual(body[1].lengthSeconds, 0, "LIVE -> lengthSeconds 0 (як чекає fmtDur)");
+    assert.strictEqual(body[1].viewCount, "1 234 watching",
+      "у стрімів viewCountText приходить у runs, не simpleText");
+    console.log("ok worker: yt-scrape як основне джерело");
+  }
+
+  // парсер: баланс дужок, а не регекс до першого ";"
+  {
+    const { fn } = await runWorker({ upstream: () => "fail" });
+    assert.strictEqual(
+      fn.extractYtInitialData('<script>var ytInitialData = {"a":"};</script>","b":{"c":1}};</script>'),
+      '{"a":"};</script>","b":{"c":1}}',
+      "дужки й ; всередині рядка не мають зупиняти парсер");
+    assert.strictEqual(fn.extractYtInitialData('x = {"t":"\\""};'), null,
+      "без маркера — null");
+    assert.strictEqual(fn.extractYtInitialData('ytInitialData = {"a":{'), null,
+      "обрізаний HTML — null, а не виняток");
+    assert.strictEqual(fn.parseDurationToSeconds("12:34"), 754);
+    assert.strictEqual(fn.parseDurationToSeconds("1:02:03"), 3723);
+    assert.strictEqual(fn.parseDurationToSeconds(undefined), 0, "немає тривалості -> 0");
+    assert.strictEqual(fn.parseDurationToSeconds("LIVE"), 0, "сміття -> 0, без NaN");
+    console.log("ok worker: extractYtInitialData + parseDurationToSeconds");
+  }
+
+  // consent-сторінка / порожній результат -> фолбек на Invidious
+  {
+    const CONSENT = { html: '<form action="https://consent.youtube.com/save">' };
+    for (const [name, page] of [["consent", CONSENT], ["без відео", ytPage([])]]) {
+      const { w, calls } = await runWorker({ upstream: (u) => (isYT(u) ? page : VID_REL) });
+      const res = await w.fetch(new Request("https://x/search?q=тест"), {}, ctx);
+      assert.strictEqual(res.headers.get("X-Backend"), "invidious", name + " -> фолбек");
+      assert.ok(calls.length > 1, name + ": після скрейпу мав піти запит до дзеркала");
+    }
+    console.log("ok worker: consent/порожньо -> фолбек на Invidious");
+  }
+
+  // page>1 — одразу Invidious, скрейп навіть не пробуємо
+  {
+    const { w, calls } = await runWorker({ upstream: (u) => (isYT(u) ? YT_OK : VID_REL) });
+    const res = await w.fetch(new Request("https://x/search?q=тест&page=2"), {}, ctx);
+    assert.strictEqual(res.headers.get("X-Backend"), "invidious");
+    assert.ok(!calls.some(isYT), "для page>1 скрейпу немає (continuation-токен не реалізовано)");
+    console.log("ok worker: page>1 -> одразу Invidious");
+  }
+
   // ротація: перші два дзеркала падають, наступне віддає дані
   {
-    const DEAD = ["yt.chocolatemoo53.com", "inv.nadeko.net"];
+    const DEAD = ["inv.nadeko.net", "invidious.nerdvpn.de", "inv.thepixora.com"];
     const { w, calls } = await runWorker({
       upstream: (u) => (DEAD.some((h) => u.includes(h)) ? "fail" : VID_REL),
     });
-    const res = await w.fetch(new Request("https://x/search?q=тест"), {}, ctx);
+    const res = await w.fetch(
+      new Request("https://x/search?q=тест", { headers: { Origin: LOCAL } }), {}, ctx);
     assert.strictEqual(res.status, 200, "має перебрати дзеркала до робочого");
-    assert.strictEqual(res.headers.get("Access-Control-Allow-Origin"), "*", "потрібен CORS *");
+    assert.strictEqual(res.headers.get("Access-Control-Allow-Origin"), LOCAL,
+      "дозволений origin має вертатись як є (інакше Live Server ловить CORS)");
     assert.ok(calls.length >= 3, "мали спробувати кілька дзеркал, було " + calls.length);
     const body = await res.json();
     assert.strictEqual(body[0].videoThumbnails[0].url.slice(0, 8), "https://",
@@ -755,15 +890,16 @@ const ctx = { waitUntil: (p) => p };
     console.log("ok worker: ротація дзеркал + CORS + абсолютні прев'ю");
   }
 
-  // усі впали -> 503 з JSON-помилкою і CORS
+  // усі впали -> 502 з JSON-помилкою і CORS
   {
     const { w } = await runWorker({ upstream: () => "fail" });
-    const res = await w.fetch(new Request("https://x/search?q=тест"), {}, ctx);
-    assert.strictEqual(res.status, 503);
-    assert.strictEqual(res.headers.get("Access-Control-Allow-Origin"), "*",
+    const res = await w.fetch(
+      new Request("https://x/search?q=тест", { headers: { Origin: LOCAL } }), {}, ctx);
+    assert.strictEqual(res.status, 502);
+    assert.strictEqual(res.headers.get("Access-Control-Allow-Origin"), LOCAL,
       "навіть помилка має йти з CORS, інакше браузер її не побачить");
-    assert.strictEqual((await res.json()).error, "all_instances_down");
-    console.log("ok worker: усі дзеркала впали -> 503 + CORS");
+    assert.strictEqual((await res.json()).error, "all instances unavailable");
+    console.log("ok worker: усі дзеркала впали -> 502 + CORS");
   }
 
   // кеш: другий однаковий запит не йде в upstream
@@ -785,26 +921,72 @@ const ctx = { waitUntil: (p) => p };
     assert.strictEqual(bad.status, 400, "порожній q -> 400");
     const nf = await w.fetch(new Request("https://x/other"), {}, ctx);
     assert.strictEqual(nf.status, 404, "невідомий шлях -> 404");
-    const pre = await w.fetch(new Request("https://x/search?q=a", { method: "OPTIONS" }), {}, ctx);
+    const pre = await w.fetch(new Request("https://x/search?q=a",
+      { method: "OPTIONS", headers: { Origin: LOCAL } }), {}, ctx);
     assert.strictEqual(pre.status, 204, "preflight OPTIONS -> 204");
-    assert.strictEqual(pre.headers.get("Access-Control-Allow-Origin"), "*");
+    assert.strictEqual(pre.headers.get("Access-Control-Allow-Origin"), LOCAL,
+      "preflight теж має echo'їти дозволений origin");
     console.log("ok worker: валідація входу + preflight");
+  }
+
+  // rate limit: 30 запитів на IP за 60 с, далі 429 + Retry-After
+  {
+    const { w } = await runWorker({ upstream: (u) => (isYT(u) ? YT_OK : VID_REL) });
+    const req = (ip, q) => new Request("https://x/search?q=" + q,
+      { headers: { "CF-Connecting-IP": ip } });
+    let last;
+    // різні q, щоб кожен запит проходив повз кеш і справді рахувався
+    for (let i = 0; i < 30; i++) last = await w.fetch(req("1.1.1.1", "q" + i), {}, ctx);
+    assert.strictEqual(last.status, 200, "30 запитів мають пройти");
+    const over = await w.fetch(req("1.1.1.1", "q30"), {}, ctx);
+    assert.strictEqual(over.status, 429, "31-й запит -> 429");
+    assert.strictEqual(over.headers.get("Retry-After"), "60");
+    assert.strictEqual((await over.json()).error, "rate_limited");
+    assert.strictEqual(over.headers.get("Access-Control-Allow-Origin"), wOrigins[0],
+      "429 теж має йти з CORS");
+    const other = await w.fetch(req("2.2.2.2", "q0"), {}, ctx);
+    assert.strictEqual(other.status, 200, "ліміт рахується окремо на кожен IP");
+    console.log("ok worker: rate limit 30/60с на IP -> 429 + Retry-After");
+  }
+
+  // чужий origin і запит без Origin -> дефолт (перший з білого списку)
+  {
+    const { w } = await runWorker({ upstream: () => VID_REL });
+    const evil = await w.fetch(new Request("https://x/search?q=a",
+      { headers: { Origin: "https://evil.example" } }), {}, ctx);
+    assert.strictEqual(evil.headers.get("Access-Control-Allow-Origin"), wOrigins[0],
+      "чужий origin не має вертатись у заголовку");
+    const noOrigin = await w.fetch(new Request("https://x/search?q=b"), {}, ctx);
+    assert.strictEqual(noOrigin.headers.get("Access-Control-Allow-Origin"), wOrigins[0],
+      "запит без Origin (curl) -> прод-домен як дефолт");
+    assert.strictEqual(noOrigin.headers.get("Vary"), "Origin",
+      "без Vary кеш віддасть чужому origin попередній заголовок");
+    console.log("ok worker: білий список origin'ів (echo / дефолт / Vary)");
   }
 })().catch(e => { console.error("!! worker tests:", e.message); process.exit(1); });
 
-// --- 5. живий запит до дзеркала, яке використає Worker ---
-const url = "https://yt.chocolatemoo53.com/api/v1/search?q=africa+online&page=1&type=video";
-fetch(url, { signal: AbortSignal.timeout(12000) })
-  .then(r => { assert.strictEqual(r.status, 200);
-               assert.match(r.headers.get("content-type")||"", /json/);
-               assert.strictEqual(r.headers.get("access-control-allow-origin"), "*", "потрібен CORS для браузера");
-               return r.json(); })
-  .then(d => {
-    assert.ok(Array.isArray(d) && d.length > 0, "порожня відповідь");
-    const v = d[0];
-    assert.ok(v.videoId && v.title, "немає videoId/title");
-    assert.ok((v.videoThumbnails||[]).some(t => t.quality === "medium"), "немає medium thumbnail");
-    console.log("ok live API (" + d.length + " відео, напр. \"" + v.title.slice(0,40) + "\")");
-    console.log("\nВСІ ПЕРЕВІРКИ ПРОЙДЕНО");
-  })
-  .catch(e => { console.log("!! live API недоступний:", e.message, "(логіка вище — ok)"); });
+// --- 5. живий прогін основного джерела (yt-scrape) ---
+// Мережева перевірка: чи не змінив YouTube розмітку ytInitialData. Не
+// фатальна — залежить від інтернету й від того, чи не показали нам капчу.
+// З IP Cloudflare результат може відрізнятись: дивіться X-Backend у проді.
+(async () => {
+  const sandbox = {
+    console, URL, Request, Response, Headers, AbortController, Array, Number,
+    JSON, setTimeout, clearTimeout, encodeURIComponent, parseInt, Map, Date, fetch,
+  };
+  sandbox.globalThis = sandbox;
+  require("vm").createContext(sandbox);
+  require("vm").runInContext(worker.replace(/^export default/m, "globalThis.__W ="), sandbox);
+
+  const videos = await sandbox.scrapeYouTube("africa camera online");
+  assert.ok(videos && videos.length > 0, "скрейп нічого не повернув (капча/змінилась розмітка?)");
+  const v = videos[0];
+  assert.ok(v.videoId && v.title, "немає videoId/title");
+  assert.ok(v.videoThumbnails.length && /^https:/.test(v.videoThumbnails[0].url),
+    "прев'ю мають бути абсолютними URL");
+  assert.ok(videos.some(x => x.lengthSeconds > 0) || videos.every(x => x.lengthSeconds === 0),
+    "lengthSeconds має бути числом");
+  console.log("ok live yt-scrape (" + videos.length + " відео, напр. \"" +
+              v.title.slice(0, 40) + "\")");
+  console.log("\nВСІ ПЕРЕВІРКИ ПРОЙДЕНО");
+})().catch(e => { console.log("!! live yt-scrape недоступний:", e.message, "(логіка вище — ok)"); });
